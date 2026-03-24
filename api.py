@@ -266,6 +266,76 @@ def get_dokumente_fuer_bauteil(teilenummer: str):
     return {"bauteil": bt.get("teilenummer"), "dokumente": docs, "count": len(docs)}
 
 
+def search_patente(query: str = None, anmelder: str = None, ipc_klasse: str = None, limit: int = 50):
+    """Sucht Patente nach Titel, Anmelder, IPC-Klasse oder Doc-ID."""
+    results = []
+    q = (query or "").lower()
+
+    for pat in G["nodes"].get("Patent", []):
+        if len(results) >= limit:
+            break
+        if anmelder:
+            pat_orgs = []
+            for e in EDGES_BY_VON.get(pat["id"], []):
+                if e["_edge_typ"] == "P01_angemeldet_von":
+                    org = ID_INDEX.get(e["nach"])
+                    if org:
+                        pat_orgs.append(org.get("name", ""))
+            if not any(anmelder.lower() in o.lower() for o in pat_orgs):
+                continue
+        if ipc_klasse:
+            if not any(ipc_klasse.upper() in ipc.upper() for ipc in pat.get("ipc_classes", [])):
+                continue
+        if q:
+            text = " ".join([str(pat.get("titel", "")), str(pat.get("titel_en", "")),
+                             str(pat.get("abstract", "")), str(pat.get("doc_id", ""))]).lower()
+            if q not in text:
+                continue
+
+        anmelder_namen = []
+        for e in EDGES_BY_VON.get(pat["id"], []):
+            if e["_edge_typ"] == "P01_angemeldet_von":
+                org = ID_INDEX.get(e["nach"])
+                if org:
+                    anmelder_namen.append(org.get("name", ""))
+
+        results.append({
+            "id": pat["id"], "doc_id": pat.get("doc_id"), "titel": pat.get("titel", ""),
+            "anmelder": anmelder_namen, "ipc_classes": pat.get("ipc_classes", []),
+            "filing_date": pat.get("filing_date", ""), "publication_date": pat.get("publication_date", ""),
+            "abstract": (pat.get("abstract", "") or "")[:200],
+        })
+
+    return {"patente": results, "count": len(results), "total_im_graph": len(G["nodes"].get("Patent", []))}
+
+
+def get_patent_statistik(anmelder: str = None):
+    """Patent-Statistiken: Top-Anmelder, IPC-Verteilung, Patente pro Jahr."""
+    from collections import Counter
+    anmelder_count = Counter()
+    ipc_count = Counter()
+    year_count = Counter()
+
+    for pat in G["nodes"].get("Patent", []):
+        for e in EDGES_BY_VON.get(pat["id"], []):
+            if e["_edge_typ"] == "P01_angemeldet_von":
+                org = ID_INDEX.get(e["nach"])
+                if org:
+                    anmelder_count[org.get("name", "?")] += 1
+        for ipc in pat.get("ipc_classes", []):
+            ipc_count[ipc.strip()[:10].strip()] += 1
+        pub = pat.get("publication_date", "")
+        if len(pub) >= 4:
+            year_count[pub[:4]] += 1
+
+    return {
+        "total_patente": len(G["nodes"].get("Patent", [])),
+        "top_anmelder": [{"name": n, "count": c} for n, c in anmelder_count.most_common(20)],
+        "top_ipc_klassen": [{"ipc": i, "count": c} for i, c in ipc_count.most_common(10)],
+        "nach_jahr": [{"jahr": y, "count": c} for y, c in sorted(year_count.items())],
+    }
+
+
 def get_graph_stats():
     return {
         "name": "BPW Running Gear Knowledge Graph",
@@ -299,6 +369,8 @@ def root():
             "GET /api/trailer",
             "GET /api/reklamationen",
             "GET /api/dokumente/{teilenummer}",
+            "GET /api/patente?q=Achse&anmelder=BPW",
+            "GET /api/patente/statistik",
         ]
     }
 
@@ -356,6 +428,19 @@ def api_reklamationen(hersteller: str = Query(None)):
 @app.get("/api/dokumente/{teilenummer}", summary="Dokumente zu Teilenummer")
 def api_dokumente(teilenummer: str):
     return get_dokumente_fuer_bauteil(teilenummer)
+
+@app.get("/api/patente", summary="Patente suchen")
+def api_patente(
+    q: str = Query(None, description="Suchbegriff (Titel, Abstract, Doc-ID)"),
+    anmelder: str = Query(None, description="Anmelder-Filter (z.B. 'BPW', 'SAF')"),
+    ipc: str = Query(None, description="IPC-Klasse (z.B. 'B60B35')"),
+    limit: int = Query(50, ge=1, le=500),
+):
+    return search_patente(q, anmelder, ipc, limit)
+
+@app.get("/api/patente/statistik", summary="Patent-Statistiken")
+def api_patent_stats(anmelder: str = Query(None, description="Filter nach Anmelder")):
+    return get_patent_statistik(anmelder)
 
 
 # ── Health Check ─────────────────────────────────────────────────────────────
